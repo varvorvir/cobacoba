@@ -5,12 +5,9 @@
     - Warm, simple UI
     - 3 buttons: Start CP, Stop, Start To End
     - Pluggable routes under /routes
-    - Legacy wrapper:
-        * Kalau route lama mendefinisikan fungsi lokal (mis. runFromCheckpoint/stopRoute/runAllRoutes
-          atau StartCP/StopRoute/StartToEnd), Fast Hub otomatis menambahkan `return { ... }`
-          agar tombol bisa memanggilnya.
-        * Kalau route pakai GLOBAL (_G.StartCP, _G.StopRoute, _G.StartToEnd), juga dideteksi.
-    - Legacy GUI hider: menyembunyikan GUI lama bertuliskan "WataX".
+    - **Legacy wrapper**: if a legacy route defines *local* functions (e.g. runFromCheckpoint/stopRoute/runAllRoutes)
+      we auto-append an export and return them as a table, so buttons work.
+    - **Legacy GUI hider**: hide old "WataX" GUI if present.
 ]]
 
 -- ===== Config =====
@@ -125,32 +122,21 @@ local function fetchRouteSource(name)
     return game:HttpGet(url)
 end
 
--- Tambahkan export table di akhir source kalau route pakai fungsi lokal.
--- Deteksi beberapa nama umum (runFromCheckpoint/stopRoute/runAllRoutes dan StartCP/StopRoute/StartToEnd).
 local function tryLegacyWrap(src)
-    local has =
-        src:find("runFromCheckpoint") or src:find("stopRoute") or src:find("runAllRoutes") or
-        src:find("StartCP") or src:find("StopRoute") or src:find("StartToEnd") or
-        src:find("start_cp") or src:find("start_to_end")
-
-    if has then
-        local export = ([[
-return {
-    start_cp    = (runFromCheckpoint or StartCP or start_cp),
-    stop        = (stopRoute or StopRoute or Stop or stop),
-    start_to_end= (runAllRoutes or StartToEnd or start_to_end)
-}]]):gsub("\r","")
-        return src .. "\n" .. export
+    local hasRun   = src:find("runFromCheckpoint")
+    local hasStop  = src:find("stopRoute")
+    local hasAll   = src:find("runAllRoutes")
+    if hasRun or hasStop or hasAll then
+        local export = "\nreturn { start_cp = (runFromCheckpoint or StartCP), stop = (stopRoute or StopRoute or Stop), start_to_end = (runAllRoutes or StartToEnd) }"
+        return src .. export
     end
     return nil
 end
 
--- Sembunyikan GUI lama "WataX"
 local function hideLegacyGuis()
     local function hideIf(inst)
-        local isTxt = inst:IsA("TextLabel") or inst:IsA("TextButton") or inst:IsA("TextBox")
-        if (isTxt and inst.Text and inst.Text:lower():find("watax")) or
-           (inst:IsA("ScreenGui") and inst.Name:lower():find("watax")) then
+        local okTxt = (inst:IsA("TextLabel") or inst:IsA("TextButton") or inst:IsA("TextBox")) and inst.Text
+        if okTxt and okTxt:lower():find("watax") then
             local root = inst
             while root and not root:IsA("ScreenGui") do root = root.Parent end
             if root and root:IsA("ScreenGui") then
@@ -160,62 +146,58 @@ local function hideLegacyGuis()
                 pcall(function() inst.Visible = false end)
             end
         end
+        if inst:IsA("ScreenGui") and inst.Name:lower():find("watax") then
+            pcall(function() inst.Enabled = false end)
+        end
     end
-    local pg = plr:FindFirstChildOfClass("PlayerGui")
+    local pg = game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui")
     if pg then for _,d in ipairs(pg:GetDescendants()) do hideIf(d) end end
-    for _,d in ipairs(CoreGui:GetDescendants()) do hideIf(d) end
-end
-
-local function fillRouteDefaults(rt)
-    rt.start_cp     = rt.start_cp     or NOOP_ROUTE.start_cp
-    rt.stop         = rt.stop         or NOOP_ROUTE.stop
-    rt.start_to_end = rt.start_to_end or NOOP_ROUTE.start_to_end
-    return rt
+    for _,d in ipairs(game:GetService("CoreGui"):GetDescendants()) do hideIf(d) end
 end
 
 local function loadRoute(name)
-    local ok, resultOrErr = pcall(function()
+    local ok, result = pcall(function()
         local src = fetchRouteSource(name)
 
-        -- 1) Coba: module-style (return table)
+        -- Try normal module
         local f1 = loadstring(src)
         local ret = f1()
-        if typeof(ret) == "table" then
-            return fillRouteDefaults(ret)
-        end
+        if typeof(ret) == "table" then return ret end
 
-        -- 2) Coba: legacy GLOBAL
+        -- Try legacy globals
         local legacy = {
             start_cp     = rawget(_G, "StartCP") or rawget(_G, "start_cp") or rawget(_G, "Start_Cp"),
             stop         = rawget(_G, "StopRoute") or rawget(_G, "stop") or rawget(_G, "Stop"),
             start_to_end = rawget(_G, "StartToEnd") or rawget(_G, "start_to_end") or rawget(_G, "Start_To_End"),
         }
         if legacy.start_cp or legacy.stop or legacy.start_to_end then
-            return fillRouteDefaults(legacy)
+            legacy.start_cp     = legacy.start_cp     or NOOP_ROUTE.start_cp
+            legacy.stop         = legacy.stop         or NOOP_ROUTE.stop
+            legacy.start_to_end = legacy.start_to_end or NOOP_ROUTE.start_to_end
+            return legacy
         end
 
-        -- 3) Coba: legacy-local wrapper (append export)
+        -- Try source-wrapping legacy locals
         local wrapped = tryLegacyWrap(src)
         if wrapped then
             local f2 = loadstring(wrapped)
             local ret2 = f2()
-            if typeof(ret2) == "table" then
-                return fillRouteDefaults(ret2)
-            end
+            if typeof(ret2) == "table" then return ret2 end
         end
 
         return nil
     end)
 
     if not ok then
-        return nil, tostring(resultOrErr)
+        return nil, tostring(result)
     end
-    if resultOrErr == nil then
+
+    if result == nil then
         return nil, "route returned nothing and legacy globals not found"
     end
 
     hideLegacyGuis()
-    return resultOrErr, nil
+    return result, nil
 end
 
 -- ===== UI =====
@@ -297,11 +279,8 @@ row1.Size = UDim2.new(1, -16, 0, 50)
 row1.Position = UDim2.fromOffset(8, 88)
 row1.Parent = root
 
-local startCPBtn = makeButton("Start CP", UDim2.new(0.5, -8, 1, 0), UDim2.fromOffset(0, 0), COLOR.btnG)
-startCPBtn.Parent = row1
-
-local stopBtn    = makeButton("Stop",    UDim2.new(0.5, -8, 1, 0), UDim2.fromScale(0.5, 0), COLOR.btnR)
-stopBtn.Parent = row1
+local startCPBtn = makeButton("Start CP", UDim2.new(0.5, -8, 1, 0), UDim2.fromOffset(0, 0), COLOR.btnG); startCPBtn.Parent = row1
+local stopBtn    = makeButton("Stop",    UDim2.new(0.5, -8, 1, 0), UDim2.fromScale(0.5, 0), COLOR.btnR); stopBtn.Parent = row1
 
 local row2 = Instance.new("Frame")
 row2.BackgroundTransparency = 1
@@ -309,11 +288,13 @@ row2.Size = UDim2.new(1, -16, 0, 50)
 row2.Position = UDim2.fromOffset(8, 144)
 row2.Parent = root
 
-local startEndBtn = makeButton("Start To End", UDim2.new(1, 0, 1, 0), UDim2.fromOffset(0, 0), COLOR.btnO)
-startEndBtn.Parent = row2
+local startEndBtn = makeButton("Start To End", UDim2.new(1, 0, 1, 0), UDim2.fromOffset(0, 0), COLOR.btnO); startEndBtn.Parent = row2
 
 -- ===== Boot: feeder + load route =====
-local feederConn = startWalkFeeder()
+local feederConn = nil
+if _G.ForceFeeder or not char:FindFirstChild("Animate") then
+    feederConn = startWalkFeeder()
+end
 
 local currentRoute = NOOP_ROUTE
 local function setRoute(name)
@@ -343,3 +324,68 @@ _G.FastHub_SetRoute = function(name) setRoute(name) end
 
 -- Cleanup
 gui.Destroying:Connect(function() if feederConn then feederConn:Disconnect() end end)
+
+
+-- ===== Simple Animator (R15 defaults) =====
+-- Dipakai kalau karakter TIDAK punya Script "Animate".
+do
+    if not char:FindFirstChild("Animate") then
+        local animator = humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator", humanoid)
+
+        local ids = {
+            idle = "rbxassetid://507766666",
+            walk = "rbxassetid://507777826",
+            run  = "rbxassetid://507767714",
+            jump = "rbxassetid://507765000",
+            fall = "rbxassetid://507767968",
+            climb= "rbxassetid://507765644",
+            swim = "rbxassetid://507785072",
+        }
+
+        local tracks = {}
+        local function load(name)
+            local a = Instance.new("Animation")
+            a.AnimationId = ids[name]
+            local t = animator:LoadAnimation(a)
+            t.Priority = Enum.AnimationPriority.Movement
+            t.Looped = (name == "idle" or name == "walk" or name == "run" or name == "swim" or name == "climb")
+            tracks[name] = t
+            return t
+        end
+
+        for k in pairs(ids) do load(k) end
+        local current
+
+        local function play(name, speed)
+            local t = tracks[name]; if not t then return end
+            if current and current ~= t then pcall(function() current:Stop(0.12) end) end
+            current = t
+            pcall(function() t:Play(0.12, 1, speed or 1) end)
+        end
+
+        -- state-based anim
+        humanoid.StateChanged:Connect(function(_, new)
+            if new == Enum.HumanoidStateType.Jumping then
+                play("jump", 1)
+            elseif new == Enum.HumanoidStateType.Freefall then
+                play("fall", 1)
+            elseif new == Enum.HumanoidStateType.Swimming then
+                play("swim", 1)
+            elseif new == Enum.HumanoidStateType.Climbing then
+                play("climb", 1)
+            end
+        end)
+
+        -- movement-based anim
+        game:GetService("RunService").Heartbeat:Connect(function()
+            local moving = humanoid.MoveDirection.Magnitude > 0.01
+            if moving then
+                local speedScale = math.clamp(humanoid.WalkSpeed / 16, 0.9, 1.4)
+                -- pakai run untuk kecepatan default; ganti ke walk kalau ingin langkah lebih lambat
+                play("run", speedScale)
+            else
+                play("idle", 1)
+            end
+        end)
+    end
+end
