@@ -1,13 +1,14 @@
 --[[
-    Fast Hub - Main (Clean + Legacy Wrapper)
+    Fast Hub - Main (Clean + Legacy Wrapper + Route-Aware Feeder)
     ------------------------------------------------
     - No key (GUI opens immediately)
     - Warm, simple UI
     - 3 buttons: Start CP, Stop, Start To End
     - Pluggable routes under /routes
-    - **Legacy wrapper**: if a legacy route defines *local* functions (e.g. runFromCheckpoint/stopRoute/runAllRoutes)
-      we auto-append an export and return them as a table, so buttons work.
-    - **Legacy GUI hider**: hide old "WataX" GUI if present.
+    - Legacy wrapper + GUI hider
+    - NEW: Feeder otomatis AKTIF saat route berjalan (meski Animate ada),
+           supaya anim jalan tetap hidup ketika route memindahkan HRP via CFrame/teleport.
+           Feeder mati lagi saat Stop, kecuali _G.ForceFeeder = true.
 ]]
 
 -- ===== Config =====
@@ -86,28 +87,72 @@ end
 
 -- ===== Walk Animation Feeder =====
 local function startWalkFeeder()
-    local animator = humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator", humanoid)
-    if not char:FindFirstChild("Animate") then
-        local anim = Instance.new("Animation")
-        anim.AnimationId = "rbxassetid://507777826"
-        local track = animator:LoadAnimation(anim)
-        track.Priority = Enum.AnimationPriority.Movement
-        track.Looped = true
-        track:Play(0.1, 1, 1)
-    end
-
     local lastPos = hrp.Position
     return RunService.Heartbeat:Connect(function()
         if not hrp or not hrp.Parent then return end
-        local d = hrp.Position - lastPos
+        local pos = hrp.Position
+        local d = pos - lastPos
         local flat = Vector3.new(d.X, 0, d.Z)
         if flat.Magnitude > 0.02 then
             humanoid:Move(flat.Unit, true)
         else
             humanoid:Move(Vector3.zero, true)
         end
-        lastPos = hrp.Position
+        lastPos = pos
     end)
+end
+
+-- ===== Simple Animator (fallback kalau Animate tidak ada) =====
+do
+    if not char:FindFirstChild("Animate") then
+        local animator = humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator", humanoid)
+        local ids = {
+            idle = "rbxassetid://507766666",
+            walk = "rbxassetid://507777826",
+            run  = "rbxassetid://507767714",
+            jump = "rbxassetid://507765000",
+            fall = "rbxassetid://507767968",
+            climb= "rbxassetid://507765644",
+            swim = "rbxassetid://507785072",
+        }
+        local tracks = {}
+        local function load(name)
+            local a = Instance.new("Animation"); a.AnimationId = ids[name]
+            local t = animator:LoadAnimation(a)
+            t.Priority = Enum.AnimationPriority.Movement
+            t.Looped = (name == "idle" or name == "walk" or name == "run" or name == "swim" or name == "climb")
+            tracks[name] = t
+            return t
+        end
+        for k in pairs(ids) do load(k) end
+        local current
+        local function play(name, speed)
+            local t = tracks[name]; if not t then return end
+            if current and current ~= t then pcall(function() current:Stop(0.12) end) end
+            current = t
+            pcall(function() t:Play(0.12, 1, speed or 1) end)
+        end
+        humanoid.StateChanged:Connect(function(_, new)
+            if new == Enum.HumanoidStateType.Jumping then
+                play("jump", 1)
+            elseif new == Enum.HumanoidStateType.Freefall then
+                play("fall", 1)
+            elseif new == Enum.HumanoidStateType.Swimming then
+                play("swim", 1)
+            elseif new == Enum.HumanoidStateType.Climbing then
+                play("climb", 1)
+            end
+        end)
+        RunService.Heartbeat:Connect(function()
+            local moving = humanoid.MoveDirection.Magnitude > 0.01
+            if moving then
+                local s = math.clamp(humanoid.WalkSpeed / 16, 0.9, 1.4)
+                play("run", s)
+            else
+                play("idle", 1)
+            end
+        end)
+    end
 end
 
 -- ===== Route Handling =====
@@ -123,20 +168,27 @@ local function fetchRouteSource(name)
 end
 
 local function tryLegacyWrap(src)
-    local hasRun   = src:find("runFromCheckpoint")
-    local hasStop  = src:find("stopRoute")
-    local hasAll   = src:find("runAllRoutes")
-    if hasRun or hasStop or hasAll then
-        local export = "\nreturn { start_cp = (runFromCheckpoint or StartCP), stop = (stopRoute or StopRoute or Stop), start_to_end = (runAllRoutes or StartToEnd) }"
-        return src .. export
+    local has =
+        src:find("runFromCheckpoint") or src:find("stopRoute") or src:find("runAllRoutes") or
+        src:find("StartCP") or src:find("StopRoute") or src:find("StartToEnd") or
+        src:find("start_cp") or src:find("start_to_end")
+    if has then
+        local export = ([=[
+return {
+    start_cp    = (runFromCheckpoint or StartCP or start_cp),
+    stop        = (stopRoute or StopRoute or Stop or stop),
+    start_to_end= (runAllRoutes or StartToEnd or start_to_end)
+}]=])
+        return src .. "\n" .. export
     end
     return nil
 end
 
 local function hideLegacyGuis()
     local function hideIf(inst)
-        local okTxt = (inst:IsA("TextLabel") or inst:IsA("TextButton") or inst:IsA("TextBox")) and inst.Text
-        if okTxt and okTxt:lower():find("watax") then
+        local isTxt = inst:IsA("TextLabel") or inst:IsA("TextButton") or inst:IsA("TextBox")
+        if (isTxt and inst.Text and inst.Text:lower():find("watax")) or
+           (inst:IsA("ScreenGui") and inst.Name:lower():find("watax")) then
             local root = inst
             while root and not root:IsA("ScreenGui") do root = root.Parent end
             if root and root:IsA("ScreenGui") then
@@ -146,58 +198,58 @@ local function hideLegacyGuis()
                 pcall(function() inst.Visible = false end)
             end
         end
-        if inst:IsA("ScreenGui") and inst.Name:lower():find("watax") then
-            pcall(function() inst.Enabled = false end)
-        end
     end
-    local pg = game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local pg = plr:FindFirstChildOfClass("PlayerGui")
     if pg then for _,d in ipairs(pg:GetDescendants()) do hideIf(d) end end
-    for _,d in ipairs(game:GetService("CoreGui"):GetDescendants()) do hideIf(d) end
+    for _,d in ipairs(CoreGui:GetDescendants()) do hideIf(d) end
+end
+
+local function fillRouteDefaults(rt)
+    rt.start_cp     = rt.start_cp     or NOOP_ROUTE.start_cp
+    rt.stop         = rt.stop         or NOOP_ROUTE.stop
+    rt.start_to_end = rt.start_to_end or NOOP_ROUTE.start_to_end
+    return rt
 end
 
 local function loadRoute(name)
-    local ok, result = pcall(function()
+    local ok, resultOrErr = pcall(function()
         local src = fetchRouteSource(name)
 
-        -- Try normal module
+        -- 1) try module-style
         local f1 = loadstring(src)
         local ret = f1()
-        if typeof(ret) == "table" then return ret end
+        if typeof(ret) == "table" then return fillRouteDefaults(ret) end
 
-        -- Try legacy globals
+        -- 2) try legacy globals
         local legacy = {
             start_cp     = rawget(_G, "StartCP") or rawget(_G, "start_cp") or rawget(_G, "Start_Cp"),
             stop         = rawget(_G, "StopRoute") or rawget(_G, "stop") or rawget(_G, "Stop"),
             start_to_end = rawget(_G, "StartToEnd") or rawget(_G, "start_to_end") or rawget(_G, "Start_To_End"),
         }
         if legacy.start_cp or legacy.stop or legacy.start_to_end then
-            legacy.start_cp     = legacy.start_cp     or NOOP_ROUTE.start_cp
-            legacy.stop         = legacy.stop         or NOOP_ROUTE.stop
-            legacy.start_to_end = legacy.start_to_end or NOOP_ROUTE.start_to_end
-            return legacy
+            return fillRouteDefaults(legacy)
         end
 
-        -- Try source-wrapping legacy locals
+        -- 3) try legacy-local wrapper append
         local wrapped = tryLegacyWrap(src)
         if wrapped then
             local f2 = loadstring(wrapped)
             local ret2 = f2()
-            if typeof(ret2) == "table" then return ret2 end
+            if typeof(ret2) == "table" then return fillRouteDefaults(ret2) end
         end
 
         return nil
     end)
 
     if not ok then
-        return nil, tostring(result)
+        return nil, tostring(resultOrErr)
     end
-
-    if result == nil then
+    if resultOrErr == nil then
         return nil, "route returned nothing and legacy globals not found"
     end
 
     hideLegacyGuis()
-    return result, nil
+    return resultOrErr, nil
 end
 
 -- ===== UI =====
@@ -290,10 +342,36 @@ row2.Parent = root
 
 local startEndBtn = makeButton("Start To End", UDim2.new(1, 0, 1, 0), UDim2.fromOffset(0, 0), COLOR.btnO); startEndBtn.Parent = row2
 
--- ===== Boot: feeder + load route =====
+-- ===== Feeder lifecycle + Route set/wrappers =====
 local feederConn = nil
-if _G.ForceFeeder or not char:FindFirstChild("Animate") then
-    feederConn = startWalkFeeder()
+local function ensureFeeder(on)
+    local should = on or _G.ForceFeeder
+    if should and not feederConn then
+        feederConn = startWalkFeeder()
+    elseif (not should) and feederConn then
+        feederConn:Disconnect()
+        feederConn = nil
+    end
+end
+
+local function wrapRoute(route)
+    -- aktifkan feeder saat route berjalan (agar running anim hidup walau CFrame digeser)
+    local r = {}
+    r.start_cp = function(...)
+        ensureFeeder(true)
+        return route.start_cp(...)
+    end
+    r.stop = function(...)
+        local res = route.stop(...)
+        -- matikan feeder kecuali user memaksa
+        ensureFeeder(false)
+        return res
+    end
+    r.start_to_end = function(...)
+        ensureFeeder(true)
+        return route.start_to_end(...)
+    end
+    return r
 end
 
 local currentRoute = NOOP_ROUTE
@@ -301,9 +379,11 @@ local function setRoute(name)
     routeLabel.Text = "Route: " .. name
     local route, err = loadRoute(name)
     if route then
-        currentRoute = route
+        currentRoute = wrapRoute(route)
         status.Text = "Route loaded ✓"
         status.TextColor3 = COLOR.ok
+        -- feeder default: mati dulu; nanti hidup otomatis saat start_cp/start_to_end
+        ensureFeeder(false)
     else
         currentRoute = NOOP_ROUTE
         status.Text = "Route failed: " .. tostring(err)
@@ -323,69 +403,4 @@ startEndBtn.MouseButton1Click:Connect(function() currentRoute.start_to_end() end
 _G.FastHub_SetRoute = function(name) setRoute(name) end
 
 -- Cleanup
-gui.Destroying:Connect(function() if feederConn then feederConn:Disconnect() end end)
-
-
--- ===== Simple Animator (R15 defaults) =====
--- Dipakai kalau karakter TIDAK punya Script "Animate".
-do
-    if not char:FindFirstChild("Animate") then
-        local animator = humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator", humanoid)
-
-        local ids = {
-            idle = "rbxassetid://507766666",
-            walk = "rbxassetid://507777826",
-            run  = "rbxassetid://507767714",
-            jump = "rbxassetid://507765000",
-            fall = "rbxassetid://507767968",
-            climb= "rbxassetid://507765644",
-            swim = "rbxassetid://507785072",
-        }
-
-        local tracks = {}
-        local function load(name)
-            local a = Instance.new("Animation")
-            a.AnimationId = ids[name]
-            local t = animator:LoadAnimation(a)
-            t.Priority = Enum.AnimationPriority.Movement
-            t.Looped = (name == "idle" or name == "walk" or name == "run" or name == "swim" or name == "climb")
-            tracks[name] = t
-            return t
-        end
-
-        for k in pairs(ids) do load(k) end
-        local current
-
-        local function play(name, speed)
-            local t = tracks[name]; if not t then return end
-            if current and current ~= t then pcall(function() current:Stop(0.12) end) end
-            current = t
-            pcall(function() t:Play(0.12, 1, speed or 1) end)
-        end
-
-        -- state-based anim
-        humanoid.StateChanged:Connect(function(_, new)
-            if new == Enum.HumanoidStateType.Jumping then
-                play("jump", 1)
-            elseif new == Enum.HumanoidStateType.Freefall then
-                play("fall", 1)
-            elseif new == Enum.HumanoidStateType.Swimming then
-                play("swim", 1)
-            elseif new == Enum.HumanoidStateType.Climbing then
-                play("climb", 1)
-            end
-        end)
-
-        -- movement-based anim
-        game:GetService("RunService").Heartbeat:Connect(function()
-            local moving = humanoid.MoveDirection.Magnitude > 0.01
-            if moving then
-                local speedScale = math.clamp(humanoid.WalkSpeed / 16, 0.9, 1.4)
-                -- pakai run untuk kecepatan default; ganti ke walk kalau ingin langkah lebih lambat
-                play("run", speedScale)
-            else
-                play("idle", 1)
-            end
-        end)
-    end
-end
+gui.Destroying:Connect(function() ensureFeeder(false) end)
