@@ -355,20 +355,19 @@ local function ensureFeeder(on)
 end
 
 local function wrapRoute(route)
-    -- aktifkan feeder saat route berjalan (agar running anim hidup walau CFrame digeser)
     local r = {}
+    local isWalk = (route.walk_mode == true) or (route.__walk == true)
     r.start_cp = function(...)
-        ensureFeeder(true)
+        if not isWalk then ensureFeeder(true) end
         return route.start_cp(...)
     end
     r.stop = function(...)
         local res = route.stop(...)
-        -- matikan feeder kecuali user memaksa
-        ensureFeeder(false)
+        if not isWalk then ensureFeeder(false) end
         return res
     end
     r.start_to_end = function(...)
-        ensureFeeder(true)
+        if not isWalk then ensureFeeder(true) end
         return route.start_to_end(...)
     end
     return r
