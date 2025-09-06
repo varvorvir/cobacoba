@@ -404,3 +404,122 @@ _G.FastHub_SetRoute = function(name) setRoute(name) end
 
 -- Cleanup
 gui.Destroying:Connect(function() ensureFeeder(false) end)
+
+
+-- ===== Animation Takeover (auto if moving but no tracks) =====
+local takeover = { enabled = false, tracks = {}, ids = {} }
+
+local function pickAnimIdsFromAnimate()
+    local ids = {}
+    local animate = char:FindFirstChild("Animate")
+    local function getId(pathTable)
+        local node = animate
+        for _, name in ipairs(pathTable) as any do
+            node = node and node:FindFirstChild(name)
+        end
+        if node and node:IsA("Animation") and node.AnimationId ~= "" then
+            return node.AnimationId
+        end
+        return nil
+    end
+    if animate then
+        ids.idle = getId({"idle","Animation1"}) or getId({"idle","Animation2"})
+        ids.run  = getId({"run","RunAnim"}) or getId({"walk","WalkAnim"})
+        ids.walk = ids.run
+        ids.jump = getId({"jump","JumpAnim"})
+        ids.fall = getId({"fall","FallAnim"})
+        ids.climb= getId({"climb","ClimbAnim"})
+        ids.swim = getId({"swim","Swim"}) or getId({"swimidle","SwimIdle"})
+    end
+    -- Fallback IDs (R15 defaults) if missing
+    ids.idle = ids.idle or "rbxassetid://507766666"
+    ids.run  = ids.run  or "rbxassetid://507767714"
+    ids.walk = ids.walk or "rbxassetid://507777826"
+    ids.jump = ids.jump or "rbxassetid://507765000"
+    ids.fall = ids.fall or "rbxassetid://507767968"
+    ids.climb= ids.climb or "rbxassetid://507765644"
+    ids.swim = ids.swim or "rbxassetid://507785072"
+    return ids
+end
+
+local function startTakeover()
+    if takeover.enabled then return end
+    takeover.enabled = true
+    takeover.ids = pickAnimIdsFromAnimate()
+    local animator = humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator", humanoid)
+
+    local function load(name)
+        local a = Instance.new("Animation"); a.AnimationId = takeover.ids[name]
+        local t = animator:LoadAnimation(a)
+        t.Priority = Enum.AnimationPriority.Movement
+        t.Looped = (name == "idle" or name == "walk" or name == "run" or name == "swim" or name == "climb")
+        takeover.tracks[name] = t
+        return t
+    end
+    for _,key in ipairs({"idle","walk","run","jump","fall","climb","swim"}) do load(key) end
+
+    local current
+    local function play(name, speed)
+        local t = takeover.tracks[name]; if not t then return end
+        if current and current ~= t then pcall(function() current:Stop(0.12) end) end
+        current = t
+        pcall(function() t:Play(0.12, 1, speed or 1) end)
+    end
+
+    humanoid.StateChanged:Connect(function(_, new)
+        if not takeover.enabled then return end
+        if new == Enum.HumanoidStateType.Jumping then
+            play("jump", 1)
+        elseif new == Enum.HumanoidStateType.Freefall then
+            play("fall", 1)
+        elseif new == Enum.HumanoidStateType.Swimming then
+            play("swim", 1)
+        elseif new == Enum.HumanoidStateType.Climbing then
+            play("climb", 1)
+        end
+    end)
+
+    RunService.Heartbeat:Connect(function()
+        if not takeover.enabled then return end
+        local v = hrp.AssemblyLinearVelocity
+        local speed2D = (Vector3.new(v.X,0,v.Z)).Magnitude
+        if speed2D > 0.3 then
+            local s = math.clamp(humanoid.WalkSpeed/16, 0.8, 1.6)
+            play("run", s)
+        else
+            play("idle", 1)
+        end
+    end)
+end
+
+local function anyMovementTrackPlaying()
+    local animator = humanoid:FindFirstChildOfClass("Animator")
+    if not animator then return false end
+    local tracks = animator:GetPlayingAnimationTracks()
+    for _, t in ipairs(tracks) do
+        if t.Priority == Enum.AnimationPriority.Movement and t.IsPlaying then
+            return true
+        end
+    end
+    return false
+end
+
+-- Auto-escalation: bila bergerak > 0.6s tapi tidak ada track Movement yang memainkan anim, takeover aktif.
+local movingNoAnimClock = 0
+RunService.Heartbeat:Connect(function(dt)
+    local v = hrp.AssemblyLinearVelocity
+    local speed2D = (Vector3.new(v.X,0,v.Z)).Magnitude
+    local moving = speed2D > 0.3
+
+    if moving and not anyMovementTrackPlaying() and not takeover.enabled then
+        movingNoAnimClock += dt
+        if movingNoAnimClock > 0.6 then
+            -- Matikan Animate (opsional) untuk menghindari bentrok
+            local animate = char:FindFirstChild("Animate")
+            if animate then pcall(function() animate.Disabled = true end) end
+            startTakeover()
+        end
+    else
+        movingNoAnimClock = 0
+    end
+end)
