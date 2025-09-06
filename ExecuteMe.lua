@@ -1,0 +1,1 @@
+loadstring(game:HttpGet("https://raw.githubusercontent.com/varvorvir/cobacoba/main/Loader.lua"))()
