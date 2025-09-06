@@ -414,7 +414,7 @@ local function pickAnimIdsFromAnimate()
     local animate = char:FindFirstChild("Animate")
     local function getId(pathTable)
         local node = animate
-        for _, name in ipairs(pathTable) as any do
+        for _, name in ipairs(pathTable) do
             node = node and node:FindFirstChild(name)
         end
         if node and node:IsA("Animation") and node.AnimationId ~= "" then
@@ -512,9 +512,10 @@ RunService.Heartbeat:Connect(function(dt)
     local moving = speed2D > 0.3
 
     if moving and not anyMovementTrackPlaying() and not takeover.enabled then
-        movingNoAnimClock += dt
+        movingNoAnimClock = movingNoAnimClock + dt
         if movingNoAnimClock > 0.6 then
-            -- Matikan Animate (opsional) untuk menghindari bentrok
+            -- Ambil ID anim dari Animate dulu, lalu matikan Animate agar tidak bentrok
+            if not takeover.enabled then takeover.ids = pickAnimIdsFromAnimate() end
             local animate = char:FindFirstChild("Animate")
             if animate then pcall(function() animate.Disabled = true end) end
             startTakeover()
