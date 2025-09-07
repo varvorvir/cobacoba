@@ -16,7 +16,7 @@ humanoid.Sit = false
 hrp.Anchored = false
 
 -- Make sure default Animate stays enabled
-local animate = char:FindChild("Animate") or char:FindFirstChild("Animate")
+local animate = char:FindFirstChild("Animate") or char:FindFirstChild("Animate")
 if animate then animate.Disabled = false end
 
 local routes = {
