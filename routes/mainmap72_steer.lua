@@ -26008,7 +26008,7 @@ local function steerAlong(points, startIndex)
         pcall(function() humanoid.WalkSpeed = WALK_SPEED * speedScale end)
 
         if dist <= ARRIVE_RADIUS then
-            index += 1
+            index = index + 1
             segmentStartT = os.clock()
             return
         end
@@ -26048,7 +26048,7 @@ local function steerAlong(points, startIndex)
 
         -- if too long on one waypoint, skip to next (safety)
         if os.clock() - segmentStartT > REPTH_TIME then
-            index += 1
+            index = index + 1
             segmentStartT = os.clock()
         end
     end)
