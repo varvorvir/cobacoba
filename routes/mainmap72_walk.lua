@@ -1,6 +1,5 @@
 -- routes/mainmap72_walk.lua
--- Auto-generated walking route from your legacy mainmap72.lua
--- Uses Pathfinding + Humanoid:MoveTo so animations are visible to others.
+-- Smooth walking route (no teleport) — Pathfinding + MoveTo with compression & anti-stuck
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -11,12 +10,20 @@ local char = plr.Character or plr.CharacterAdded:Wait()
 local humanoid = char:WaitForChild("Humanoid")
 local hrp = char:WaitForChild("HumanoidRootPart")
 
+-- Tuning
+local WALK_SPEED = 17               -- sedikit lebih cepat agar anim mulus
+local REACH_DIST = 3.5              -- jarak dianggap "sampai"
+local MIN_STEP   = 6.0              -- jarak minimum antar titik setelah kompresi
+local SEG_TIMEOUT = 8               -- detik per waypoint
+local TARGET_TIMEOUT = 18           -- detik per target utama
+
 humanoid.AutoRotate = true
 humanoid.Sit = false
 hrp.Anchored = false
+pcall(function() humanoid.WalkSpeed = WALK_SPEED end)
 
--- Make sure default Animate stays enabled
-local animate = char:FindFirstChild("Animate") or char:FindFirstChild("Animate")
+-- Pastikan Animate aktif supaya pakai anim default game
+local animate = char:FindFirstChild("Animate")
 if animate then animate.Disabled = false end
 
 local routes = {
@@ -25940,8 +25947,28 @@ local routes = {
       Vector3.new(755.58,2192.45,3942.15),
       Vector3.new(755.58,2192.45,3942.15)
   }}
-}
 
+
+-- Compress routes: drop points that are too close to previous kept point
+local function compress(route, minStep)
+    local out = {}
+    local last
+    for i, p in ipairs(route) do
+        if not last or (p - last).Magnitude >= minStep then
+            table.insert(out, p)
+            last = p
+        end
+    end
+    -- Always keep the last point
+    if #route > 0 and (#out == 0 or out[#out] ~= route[#route]) then
+        table.insert(out, route[#route])
+    end
+    return out
+end
+
+for idx, seg in ipairs(routes) do
+    seg[2] = compress(seg[2], MIN_STEP)
+end
 
 local M = { walk_mode = true }
 local RUNNING = false
@@ -25953,92 +25980,77 @@ local function nearestRouteAndIndex()
         local route = data[2]
         for i, p in ipairs(route) do
             local d = (p - pos).Magnitude
-            if d < bestD then
-                bestD = d; bestR = r; bestI = i
-            end
+            if d < bestD then bestD = d; bestR = r; bestI = i end
         end
     end
     return bestR, bestI
 end
 
-local function isStuck(lastPos, dur, minMove)
-    dur = dur or 0.8
-    minMove = minMove or 1.0
+local function waitMoveToFinished(timeout)
+    local finished = false
+    local conn
+    conn = humanoid.MoveToFinished:Connect(function(reached)
+        finished = reached
+        if conn then conn:Disconnect() end
+    end)
     local t0 = os.clock()
-    while os.clock() - t0 < dur do
+    while RUNNING and os.clock() - t0 < timeout and not finished do
         RunService.Heartbeat:Wait()
-        if (hrp.Position - lastPos).Magnitude > minMove then
-            return false
-        end
     end
-    return true
+    if conn then conn:Disconnect() end
+    return finished
 end
 
-local function walkTo(target, opts)
-    opts = opts or {}
-    local timeout = opts.timeout or 15
+local function followPathTo(target, timeout)
+    timeout = timeout or TARGET_TIMEOUT
+    local tStart = os.clock()
+
     local agentParams = {
         AgentRadius = 2.0,
         AgentHeight = 5.0,
         AgentCanJump = true,
     }
 
-    local path = PathfindingService:CreatePath(agentParams)
-    path:ComputeAsync(hrp.Position, target)
+    while RUNNING and os.clock() - tStart < timeout do
+        local path = PathfindingService:CreatePath(agentParams)
+        path:ComputeAsync(hrp.Position, target)
 
-    if path.Status ~= Enum.PathStatus.Success then
-        humanoid:MoveTo(target)
-        local t0 = os.clock()
-        while RUNNING and os.clock() - t0 < timeout do
-            if (hrp.Position - target).Magnitude <= 3 then return true end
-            RunService.Heartbeat:Wait()
-        end
-        return (hrp.Position - target).Magnitude <= 3
-    end
-
-    local waypoints = path:GetWaypoints()
-    for _, wp in ipairs(waypoints) do
-        if not RUNNING then return false end
-        if wp.Action == Enum.PathWaypointAction.Jump then
-            humanoid.Jump = true
-        end
-        humanoid:MoveTo(wp.Position)
-
-        local segStartPos = hrp.Position
-        local reached = false
-        local t0 = os.clock()
-        while RUNNING do
-            local dist = (hrp.Position - wp.Position).Magnitude
-            if dist <= 3 then reached = true; break end
-
-            -- Nudge kecil → menjaga state Running
-            local dir = (wp.Position - hrp.Position)
-            dir = Vector3.new(dir.X, 0, dir.Z)
-            if dir.Magnitude > 0.01 then
-                humanoid:Move(dir.Unit, true)
+        if path.Status ~= Enum.PathStatus.Success then
+            -- fallback: single MoveTo
+            humanoid:MoveTo(target)
+            if waitMoveToFinished(math.min(SEG_TIMEOUT, timeout)) then
+                return (hrp.Position - target).Magnitude <= REACH_DIST
+            else
+                -- retry with fresh path compute
             end
-
-            if isStuck(segStartPos, 0.6, 0.5) then break end
-            if os.clock() - t0 > (opts.segmentTimeout or 6) then break end
-            RunService.Heartbeat:Wait()
-        end
-
-        if not reached then
-            -- Repath sekali lagi dari posisi sekarang
-            return walkTo(target, {timeout = timeout, segmentTimeout = opts.segmentTimeout})
+        else
+            local waypoints = path:GetWaypoints()
+            for _, wp in ipairs(waypoints) do
+                if not RUNNING then return false end
+                if wp.Action == Enum.PathWaypointAction.Jump then humanoid.Jump = true end
+                humanoid:MoveTo(wp.Position)
+                if not waitMoveToFinished(SEG_TIMEOUT) then
+                    -- break to recompute path
+                    break
+                end
+                if (hrp.Position - target).Magnitude <= REACH_DIST then
+                    return true
+                end
+            end
         end
     end
 
-    return (hrp.Position - target).Magnitude <= 3
+    return (hrp.Position - target).Magnitude <= REACH_DIST
 end
 
 local function walkRoute(route, startIndex)
     for i = startIndex, #route do
         if not RUNNING then return false end
         local target = route[i]
-        if not walkTo(target, {timeout = 15, segmentTimeout = 6}) then
+        if not followPathTo(target, TARGET_TIMEOUT) then
+            -- One light retry
             humanoid:MoveTo(target)
-            RunService.Heartbeat:Wait()
+            waitMoveToFinished(6)
         end
     end
     return true
@@ -26049,7 +26061,7 @@ function M.start_cp()
     if animate then animate.Disabled = false end
     local r, i = nearestRouteAndIndex()
     local name, route = routes[r][1], routes[r][2]
-    print("[walk] start_cp on", name, "from index", i)
+    print("[walk] start_cp on", name, "from index", i, "#pts=", #route)
     walkRoute(route, i)
 end
 
@@ -26067,7 +26079,7 @@ function M.start_to_end()
         if not RUNNING then break end
         local name, route = routes[r][1], routes[r][2]
         local startIndex = (r == rStart) and iStart or 1
-        print("[walk] segment", name, "from index", startIndex)
+        print(string.format("[walk] segment %s (pts=%d) from %d", name, #route, startIndex))
         walkRoute(route, startIndex)
         RunService.Heartbeat:Wait()
     end
