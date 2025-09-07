@@ -1,21 +1,25 @@
 -- routes/mainmap72_walk.lua
 -- Auto-generated walking route from your legacy mainmap72.lua
--- Moves with Humanoid:MoveTo (no teleport), so others will see your avatar walking.
+-- Uses Pathfinding + Humanoid:MoveTo so animations are visible to others.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local PathfindingService = game:GetService("PathfindingService")
 
 local plr = Players.LocalPlayer
 local char = plr.Character or plr.CharacterAdded:Wait()
 local humanoid = char:WaitForChild("Humanoid")
 local hrp = char:WaitForChild("HumanoidRootPart")
 
--- Ensure sensible settings
 humanoid.AutoRotate = true
 humanoid.Sit = false
 hrp.Anchored = false
 
-routes = {
+-- Make sure default Animate stays enabled
+local animate = char:FindChild("Animate") or char:FindFirstChild("Animate")
+if animate then animate.Disabled = false end
+
+local routes = {
   {"CP1->CP2", {
       Vector3.new(16.63,55.17,-1082.47),
       Vector3.new(16.65,55.17,-1081.94),
@@ -25939,6 +25943,7 @@ routes = {
 }
 
 
+local M = { walk_mode = true }
 local RUNNING = false
 
 local function nearestRouteAndIndex()
@@ -25956,18 +25961,74 @@ local function nearestRouteAndIndex()
     return bestR, bestI
 end
 
-local function walkTo(target, timeout)
-    timeout = timeout or 10
-    humanoid:MoveTo(target)
+local function isStuck(lastPos, dur, minMove)
+    dur = dur or 0.8
+    minMove = minMove or 1.0
     local t0 = os.clock()
-    while RUNNING and os.clock() - t0 < timeout do
-        if (hrp.Position - target).Magnitude <= 3 then return true end
-        local state = humanoid:GetState()
-        if state == Enum.HumanoidStateType.Seated or state == Enum.HumanoidStateType.Physics then
-            humanoid:ChangeState(Enum.HumanoidStateType.Running)
-        end
+    while os.clock() - t0 < dur do
         RunService.Heartbeat:Wait()
+        if (hrp.Position - lastPos).Magnitude > minMove then
+            return false
+        end
     end
+    return true
+end
+
+local function walkTo(target, opts)
+    opts = opts or {}
+    local timeout = opts.timeout or 15
+    local agentParams = {
+        AgentRadius = 2.0,
+        AgentHeight = 5.0,
+        AgentCanJump = true,
+    }
+
+    local path = PathfindingService:CreatePath(agentParams)
+    path:ComputeAsync(hrp.Position, target)
+
+    if path.Status ~= Enum.PathStatus.Success then
+        humanoid:MoveTo(target)
+        local t0 = os.clock()
+        while RUNNING and os.clock() - t0 < timeout do
+            if (hrp.Position - target).Magnitude <= 3 then return true end
+            RunService.Heartbeat:Wait()
+        end
+        return (hrp.Position - target).Magnitude <= 3
+    end
+
+    local waypoints = path:GetWaypoints()
+    for _, wp in ipairs(waypoints) do
+        if not RUNNING then return false end
+        if wp.Action == Enum.PathWaypointAction.Jump then
+            humanoid.Jump = true
+        end
+        humanoid:MoveTo(wp.Position)
+
+        local segStartPos = hrp.Position
+        local reached = false
+        local t0 = os.clock()
+        while RUNNING do
+            local dist = (hrp.Position - wp.Position).Magnitude
+            if dist <= 3 then reached = true; break end
+
+            -- Nudge kecil → menjaga state Running
+            local dir = (wp.Position - hrp.Position)
+            dir = Vector3.new(dir.X, 0, dir.Z)
+            if dir.Magnitude > 0.01 then
+                humanoid:Move(dir.Unit, true)
+            end
+
+            if isStuck(segStartPos, 0.6, 0.5) then break end
+            if os.clock() - t0 > (opts.segmentTimeout or 6) then break end
+            RunService.Heartbeat:Wait()
+        end
+
+        if not reached then
+            -- Repath sekali lagi dari posisi sekarang
+            return walkTo(target, {timeout = timeout, segmentTimeout = opts.segmentTimeout})
+        end
+    end
+
     return (hrp.Position - target).Magnitude <= 3
 end
 
@@ -25975,8 +26036,7 @@ local function walkRoute(route, startIndex)
     for i = startIndex, #route do
         if not RUNNING then return false end
         local target = route[i]
-        if not walkTo(target, 12) then
-            -- small nudge retry once
+        if not walkTo(target, {timeout = 15, segmentTimeout = 6}) then
             humanoid:MoveTo(target)
             RunService.Heartbeat:Wait()
         end
@@ -25984,11 +26044,9 @@ local function walkRoute(route, startIndex)
     return true
 end
 
-local M = {}
-M.walk_mode = true
-
 function M.start_cp()
     RUNNING = true
+    if animate then animate.Disabled = false end
     local r, i = nearestRouteAndIndex()
     local name, route = routes[r][1], routes[r][2]
     print("[walk] start_cp on", name, "from index", i)
@@ -26003,6 +26061,7 @@ end
 
 function M.start_to_end()
     RUNNING = true
+    if animate then animate.Disabled = false end
     local rStart, iStart = nearestRouteAndIndex()
     for r = rStart, #routes do
         if not RUNNING then break end
