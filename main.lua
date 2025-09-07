@@ -12,7 +12,7 @@
 
 -- ===== Config =====
 local BRAND       = "Fast Hub"
-local DEFAULT_RT  = _G.ROUTE or "mainmap72"
+local DEFAULT_RT  = _G.ROUTE or "mainmap72_walk"
 local ROUTES_BASE = "https://raw.githubusercontent.com/varvorvir/cobacoba/main/routes/"
 
 -- Warm palette
@@ -172,12 +172,12 @@ local function tryLegacyWrap(src)
         src:find("StartCP") or src:find("StopRoute") or src:find("StartToEnd") or
         src:find("start_cp") or src:find("start_to_end")
     if has then
-        local export = ([[
+        local export = ([=[
 return {
     start_cp    = (runFromCheckpoint or StartCP or start_cp),
     stop        = (stopRoute or StopRoute or Stop or stop),
     start_to_end= (runAllRoutes or StartToEnd or start_to_end)
-}]]):gsub("\r","")
+}]=])
         return src .. "\n" .. export
     end
     return nil
@@ -360,10 +360,8 @@ local function setRoute(name)
     routeLabel.Text = "Route: " .. name
     local route, err = loadRoute(name)
     if route then
-        -- deteksi route walk_mode
         currentIsWalk = (route.walk_mode == true)
 
-        -- bungkus supaya feeder ON saat rute teleport, OFF saat stop
         local r = {}
         r.start_cp = function(...)
             ensureFeeder(not currentIsWalk)
@@ -382,7 +380,6 @@ local function setRoute(name)
 
         status.Text = "Route loaded ✓"
         status.TextColor3 = COLOR.ok
-        -- default feeder OFF (nyala otomatis di start jika perlu)
         ensureFeeder(false)
     else
         currentRoute = NOOP_ROUTE
